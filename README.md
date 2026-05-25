@@ -6,7 +6,6 @@
 Using Conda (recommended) — `setup.sh` will create the environment automatically:
 
 ```bash
-cd setup
 chmod +x setup.sh
 ./setup.sh
 ```
