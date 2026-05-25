@@ -1,22 +1,3 @@
-#!/bin/bash
-#SBATCH --job-name=arab_t_lora_test
-#SBATCH --output=logs/arab_t_lora_test_%j.out
-#SBATCH --error=logs/arab_t_lora_test_%j.err
-#SBATCH --time=24:00:00
-#SBATCH -A eecs
-#SBATCH -p dgxh
-#SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=256G
-
-module load cuda/12.8
-
-# Activate conda environment 
-# ATTENTION ##################################################
-source # [must add path to conda.sh here]
-##############################################################
-conda activate nt
-
 model=agro_nt 
 species=('arabidopsis_thaliana' 'solanum_lycopersicum' 'oryza_sativa' 'zea_mays' 'glycine_max')
 
@@ -27,7 +8,6 @@ group=group_1
 # fine_tune
 fine_tune_method=lora
 lora_r=16
-# lora_target_modules="query,value" #"intermediate.dense" and "output.dense"
 
 for name in "${species[@]}"; do
     python train.py \
