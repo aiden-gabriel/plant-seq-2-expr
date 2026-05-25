@@ -270,10 +270,19 @@ MAIN_MENU=(
 
 CUDA_VERSION=""
 SETUP_SAVE_INPUT=""
+SETUP_EXISTING_MENU_IDX=0
 SETUP_SAVE_DIR=""
 SETUP_PLANTBENCH_DIR=""
 SETUP_ERR=""
 SETUP_LOG=()
+SETUP_VIEW_MODE="status"
+SETUP_RUNNING_SCREEN_DRAWN=0
+SETUP_CURRENT_MODEL=0
+SETUP_CURRENT_STEP=""
+SETUP_SPINNER_FRAME=0
+declare -A SETUP_MODEL_RUN_STATUS=()
+declare -A SETUP_STEP_RUN_STATUS=()
+declare -A SETUP_WEIGHT_SIZE_RUN_STATUS=()
 SETUP_MODE="install"
 SETUP_PATH_LABEL_MODE="installation"
 SETUP_COMMAND_LOG="${TMPDIR:-/tmp}/plantbench_setup_$$.log"
@@ -444,6 +453,7 @@ info_box_height_for_width() {
 reset_setup_state() {
     local i
     SETUP_SAVE_INPUT=""
+    SETUP_EXISTING_MENU_IDX=0
     SETUP_SAVE_DIR=""
     SETUP_PLANTBENCH_DIR=""
     SETUP_ERR=""
@@ -527,8 +537,14 @@ setup_apply_save_dir() {
     SETUP_SAVE_DIR="${save_dir}"
     SETUP_PLANTBENCH_DIR="${SETUP_SAVE_DIR}/plantbench"
     SETUP_ERR=""
-    STATE="setup_models"
     SETUP_MENU_IDX=0
+
+    if [[ -d "${SETUP_PLANTBENCH_DIR}" ]]; then
+        SETUP_EXISTING_MENU_IDX=0
+        STATE="setup_existing_install"
+    else
+        STATE="setup_models"
+    fi
 }
 
 build_selected_models() {
@@ -653,19 +669,242 @@ selected_size_summary() {
     fi
 }
 
+setup_init_running_progress() {
+    SETUP_MODEL_RUN_STATUS=()
+    SETUP_STEP_RUN_STATUS=()
+    SETUP_WEIGHT_SIZE_RUN_STATUS=()
+    SETUP_CURRENT_MODEL=0
+    SETUP_CURRENT_STEP=""
+    SETUP_SPINNER_FRAME=0
+    SETUP_RUNNING_SCREEN_DRAWN=0
+    SETUP_VIEW_MODE="status"
+
+    local m step size_entry
+    for m in "${SELECTED_MODELS[@]}"; do
+        SETUP_MODEL_RUN_STATUS[$m]="pending"
+        for step in "Pulling container" "Cloning repo" "Downloading model weights"; do
+            SETUP_STEP_RUN_STATUS["${m}|${step}"]="pending"
+        done
+        IFS='|' read -ra size_options <<< "${MODEL_SIZES[$m]}"
+        for size_entry in "${size_options[@]}"; do
+            SETUP_WEIGHT_SIZE_RUN_STATUS["${m}|${size_entry}"]="pending"
+        done
+    done
+}
+
+setup_set_model_current() {
+    local m="$1"
+    SETUP_CURRENT_MODEL="${m}"
+    SETUP_CURRENT_STEP=""
+    SETUP_MODEL_RUN_STATUS[$m]="current"
+    render_setup_running_status_only
+}
+
+setup_set_step_status() {
+    local m="$1" step="$2" status="$3"
+    SETUP_STEP_RUN_STATUS["${m}|${step}"]="${status}"
+}
+
+setup_set_step_current() {
+    local m="$1" step="$2"
+    SETUP_CURRENT_MODEL="${m}"
+    SETUP_CURRENT_STEP="${step}"
+    SETUP_MODEL_RUN_STATUS[$m]="current"
+    setup_set_step_status "${m}" "${step}" "current"
+    render_setup_running_status_only
+}
+
+setup_finish_step() {
+    local m="$1" step="$2" status="${3:-done}"
+    setup_set_step_status "${m}" "${step}" "${status}"
+    render_setup_running_status_only
+}
+
+setup_set_weight_size_status() {
+    local m="$1" size_entry="$2" status="$3"
+    SETUP_WEIGHT_SIZE_RUN_STATUS["${m}|${size_entry}"]="${status}"
+}
+
+setup_set_weight_size_current() {
+    local m="$1" size_entry="$2"
+    setup_set_weight_size_status "${m}" "${size_entry}" "current"
+    render_setup_running_status_only
+}
+
+setup_finish_weight_size() {
+    local m="$1" size_entry="$2" status="${3:-done}"
+    setup_set_weight_size_status "${m}" "${size_entry}" "${status}"
+    render_setup_running_status_only
+}
+
+setup_finish_model() {
+    local m="$1"
+    SETUP_MODEL_RUN_STATUS[$m]="done"
+    SETUP_CURRENT_STEP=""
+    render_setup_running_status_only
+}
+
+setup_running_current_spinner_row() {
+    local __row_var="$1"
+
+    local G_W G_H G_T G_L
+    setup_running_geometry G
+
+    local row=$(( G_T + 7 ))
+    local m model_status step step_status size_entry
+    local -a size_options=()
+
+    for m in "${SELECTED_MODELS[@]}"; do
+        model_status="${SETUP_MODEL_RUN_STATUS[$m]:-pending}"
+
+        if [[ "${model_status}" == "current" ]]; then
+            printf -v "${__row_var}" '%d' "${row}"
+            return 0
+        fi
+
+        (( row++ ))
+
+        if [[ "${model_status}" == "current" ]]; then
+            for step in "Pulling container" "Cloning repo" "Downloading model weights"; do
+                (( row++ ))
+                if [[ "${step}" == "Downloading model weights" && "${SETUP_CURRENT_STEP}" == "Downloading model weights" ]]; then
+                    IFS='|' read -ra size_options <<< "${MODEL_SIZES[$m]}"
+                    for size_entry in "${size_options[@]}"; do
+                        if [[ -n "${SETUP_WEIGHT_SIZE_RUN_STATUS["${m}|${size_entry}"]:-}" ]]; then
+                            (( row++ ))
+                        fi
+                    done
+                fi
+            done
+            (( row++ ))
+        fi
+    done
+
+    return 1
+}
+
+render_setup_running_spinner_only() {
+    [[ "${STATE}" == "setup_running" ]] || return
+    [[ "${SETUP_VIEW_MODE}" == "status" ]] || return
+    (( SETUP_RUNNING_SCREEN_DRAWN == 1 )) || return
+
+    local G_W G_H G_T G_L
+    setup_running_geometry G
+
+    local spinner_row
+    setup_running_current_spinner_row spinner_row || return
+
+    local right_col=$(( G_L + G_W - 6 ))
+    move "${spinner_row}" "${right_col}"
+    printf '%s' "$(setup_spinner_char)"
+    hide_cursor
+}
+
+setup_step_display_label() {
+    local step="$1" status="$2"
+
+    case "${step}" in
+        "Pulling container")
+            case "${status}" in
+                current) printf 'Pulling container' ;;
+                done)    printf 'Pulled container' ;;
+                *)       printf 'Pull container' ;;
+            esac
+            ;;
+        "Cloning repo")
+            case "${status}" in
+                current) printf 'Cloning repo' ;;
+                done)    printf 'Cloned repo' ;;
+                *)       printf 'Clone repo' ;;
+            esac
+            ;;
+        "Downloading model weights")
+            case "${status}" in
+                current) printf 'Downloading model weights' ;;
+                done)    printf 'Downloaded model weights' ;;
+                *)       printf 'Download model weights' ;;
+            esac
+            ;;
+        *)
+            printf '%s' "${step}"
+            ;;
+    esac
+}
+
+setup_spinner_char() {
+    local frames=( "⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏" )
+    printf '%s' "${frames[$(( SETUP_SPINNER_FRAME % ${#frames[@]} ))]}"
+}
+
+setup_toggle_running_view() {
+    if [[ "${SETUP_VIEW_MODE}" == "logs" ]]; then
+        SETUP_VIEW_MODE="status"
+    else
+        SETUP_VIEW_MODE="logs"
+    fi
+    render_setup_running
+}
+
+setup_poll_running_key() {
+    local pid="${1:-}" key="" rest=""
+
+    IFS= read -rsn1 -t 0.05 key || return 0
+
+    case "${key}" in
+        x|X)
+            setup_toggle_running_view
+            ;;
+        q|Q)
+            if [[ -n "${pid}" ]]; then
+                kill "${pid}" >/dev/null 2>&1 || true
+                wait "${pid}" >/dev/null 2>&1 || true
+            fi
+            exit 0
+            ;;
+        $'\033')
+            IFS= read -rsn2 -t 0.01 rest || true
+            ;;
+    esac
+}
+
+setup_tick_running() {
+    SETUP_SPINNER_FRAME=$(( SETUP_SPINNER_FRAME + 1 ))
+    if [[ "${SETUP_VIEW_MODE}" == "status" ]]; then
+        render_setup_running_spinner_only
+    fi
+}
+
 setup_log() {
     SETUP_LOG+=("$*")
     if (( ${#SETUP_LOG[@]} > 200 )); then
         SETUP_LOG=("${SETUP_LOG[@]: -200}")
     fi
-    render_setup_running_logs_only
+
+    setup_poll_running_key
+
+    if [[ "${SETUP_VIEW_MODE}" == "logs" ]]; then
+        render_setup_running_logs_only
+    else
+        render_setup_running_status_only
+    fi
 }
+
 run_logged() {
     local label="$1"
     shift
 
     setup_log "      ${label}"
-    if "$@" >>"${SETUP_COMMAND_LOG}" 2>&1; then
+
+    "$@" >>"${SETUP_COMMAND_LOG}" 2>&1 &
+    local pid=$!
+
+    while kill -0 "${pid}" >/dev/null 2>&1; do
+        setup_poll_running_key "${pid}"
+        setup_tick_running
+        sleep 0.08
+    done
+
+    if wait "${pid}"; then
         return 0
     fi
 
@@ -680,8 +919,11 @@ download_weights() {
     local model_name="${MODEL_NAMES[$model_idx]}"
     local map_key="${model_idx}|${size_label}"
 
+    setup_set_weight_size_current "${model_idx}" "${size_label}"
+
     if [[ -z "${WEIGHT_MAP[$map_key]+x}" ]]; then
         setup_log "  WARNING: No HuggingFace repo configured for ${model_name} / ${size_label}; skipping."
+        setup_finish_weight_size "${model_idx}" "${size_label}" "skipped"
         return 0
     fi
 
@@ -692,13 +934,15 @@ download_weights() {
 
     if [[ -n "$(find "${dest}" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
         setup_log "  ✓ ${model_name} / ${size_label} already present; skipping."
+        setup_finish_weight_size "${model_idx}" "${size_label}" "done"
         return 0
     fi
 
     setup_log "  >>> ${model_name} / ${size_label}"
     setup_log "      repo: ${hf_repo}"
     setup_log "      dest: ${dest}"
-    run_logged "hf download ${hf_repo}" hf download "${hf_repo}" --local-dir "${dest}"
+    run_logged "hf download ${hf_repo}" hf download "${hf_repo}" --local-dir "${dest}" || return 1
+    setup_finish_weight_size "${model_idx}" "${size_label}" "done"
 }
 
 perform_setup() {
@@ -708,6 +952,9 @@ perform_setup() {
     SETUP_LOG=()
     SETUP_ERR=""
     : > "${SETUP_COMMAND_LOG}"
+
+    setup_init_running_progress
+    render_setup_running
 
     setup_log "Running PlantBench setup"
     setup_log "Dependency checks: OK"
@@ -727,11 +974,14 @@ perform_setup() {
     setup_log "  └── weights/"
     setup_log ""
 
-    if [[ "${SETUP_MODE}" == "modify" ]]; then
-        setup_log "Applying removals"
-        local dir_label remove_any=0
-        for m in "${SELECTED_MODELS[@]}"; do
-            model_name="${MODEL_NAMES[$m]}"
+    for m in "${SELECTED_MODELS[@]}"; do
+        model_name="${MODEL_NAMES[$m]}"
+        setup_set_model_current "${m}"
+        setup_log ">>> ${model_name}"
+
+        if [[ "${SETUP_MODE}" == "modify" ]]; then
+            setup_set_step_current "${m}" "Downloading model weights"
+            local dir_label remove_any=0
             IFS='|' read -ra sizes <<< "${MODEL_SIZES[$m]}"
             for size_entry in "${sizes[@]}"; do
                 if model_size_installed "${m}" "${size_entry}" && ! is_size_selected "${m}" "${size_entry}"; then
@@ -741,66 +991,82 @@ perform_setup() {
                     setup_log "  ✓ ${model_name} / ${size_entry} removed."
                 fi
             done
-        done
-        (( remove_any == 0 )) && setup_log "  No removals requested."
-        setup_log ""
-    fi
+            if (( remove_any == 0 )); then
+                setup_log "  No removals requested for ${model_name}."
+            fi
+            # Keep weights marked current if this model also has downloads below.
+            if ! model_has_selected_payload "${m}"; then
+                setup_finish_step "${m}" "Downloading model weights" "done"
+                setup_finish_step "${m}" "Pulling container" "skipped"
+                setup_finish_step "${m}" "Cloning repo" "skipped"
+                setup_finish_model "${m}"
+                setup_log ""
+                continue
+            fi
+        elif ! model_has_selected_payload "${m}"; then
+            setup_finish_step "${m}" "Pulling container" "skipped"
+            setup_finish_step "${m}" "Cloning repo" "skipped"
+            setup_finish_step "${m}" "Downloading model weights" "skipped"
+            setup_finish_model "${m}"
+            setup_log ""
+            continue
+        fi
 
-    setup_log "Pulling containers"
-    for m in "${SELECTED_MODELS[@]}"; do
-        model_has_selected_payload "${m}" || continue
-        model_name="${MODEL_NAMES[$m]}"
+        setup_set_step_current "${m}" "Pulling container"
         if [[ " ${pulled_containers[*]} " == *" ${m} "* ]]; then
-            continue
+            setup_log "  [shared] ${model_name} container already handled."
+            setup_finish_step "${m}" "Pulling container" "done"
+        elif [[ -z "${CONTAINER_MAP[$m]+x}" ]]; then
+            setup_log "  [STUB] ${model_name} — container link not configured; skipping."
+            pulled_containers+=("${m}")
+            setup_finish_step "${m}" "Pulling container" "skipped"
+        else
+            pulled_containers+=("${m}")
+            sif_path="${SETUP_PLANTBENCH_DIR}/containers/${CONTAINER_FILE_MAP[$m]}"
+            setup_log "  Container"
+            setup_log "      source: ${CONTAINER_MAP[$m]}"
+            setup_log "      dest: ${sif_path}"
+            run_logged "apptainer pull ${CONTAINER_FILE_MAP[$m]}" apptainer pull "${sif_path}" "${CONTAINER_MAP[$m]}" || return 1
+            setup_log "  ✓ ${model_name} container pulled."
+            setup_finish_step "${m}" "Pulling container" "done"
         fi
-        pulled_containers+=("${m}")
 
-        if [[ -z "${CONTAINER_MAP[$m]+x}" ]]; then
-            setup_log "  [STUB] ${model_name} — container link not yet configured; skipping."
-            continue
-        fi
-
-        sif_path="${SETUP_PLANTBENCH_DIR}/containers/${CONTAINER_FILE_MAP[$m]}"
-        setup_log "  >>> ${model_name}"
-        setup_log "      source: ${CONTAINER_MAP[$m]}"
-        setup_log "      dest: ${sif_path}"
-        run_logged "apptainer pull ${CONTAINER_FILE_MAP[$m]}" apptainer pull "${sif_path}" "${CONTAINER_MAP[$m]}" || return 1
-        setup_log "  ✓ ${model_name} container pulled."
-    done
-    setup_log "Containers done."
-    setup_log ""
-
-    setup_log "Cloning repos"
-    for m in "${SELECTED_MODELS[@]}"; do
-        model_has_selected_payload "${m}" || continue
-        model_name="${MODEL_NAMES[$m]}"
+        setup_set_step_current "${m}" "Cloning repo"
         repo_url="${REPO_MAP[$m]}"
         repo_dir="${REPO_DIR_MAP[$repo_url]}"
         clone_dest="${SETUP_PLANTBENCH_DIR}/repos/${repo_dir}"
 
         if [[ " ${cloned_urls[*]} " == *" ${repo_url} "* ]]; then
             setup_log "  [shared] ${model_name} → repos/${repo_dir}"
-            continue
-        fi
-        cloned_urls+=("${repo_url}")
-
-        setup_log "  >>> ${model_name}"
-        setup_log "      repo: ${repo_url}"
-        setup_log "      dest: ${clone_dest}"
-
-        if [[ -d "${clone_dest}/.git" ]]; then
-            run_logged "git pull ${repo_dir}" git -C "${clone_dest}" pull || return 1
+            setup_finish_step "${m}" "Cloning repo" "done"
         else
-            run_logged "git clone ${repo_dir}" git clone --depth 1 "${repo_url}" "${clone_dest}" || return 1
-        fi
-        setup_log "  ✓ ${model_name} repo ready."
-    done
-    setup_log "Repos done."
-    setup_log ""
+            cloned_urls+=("${repo_url}")
+            setup_log "  Repo"
+            setup_log "      repo: ${repo_url}"
+            setup_log "      dest: ${clone_dest}"
 
-    setup_log "Downloading weights"
-    for m in "${SELECTED_MODELS[@]}"; do
-        model_has_selected_payload "${m}" || continue
+            if [[ -d "${clone_dest}/.git" ]]; then
+                run_logged "git pull ${repo_dir}" git -C "${clone_dest}" pull || return 1
+            else
+                run_logged "git clone ${repo_dir}" git clone --depth 1 "${repo_url}" "${clone_dest}" || return 1
+            fi
+
+            setup_log "  ✓ ${model_name} repo ready."
+            setup_finish_step "${m}" "Cloning repo" "done"
+        fi
+
+        setup_set_step_current "${m}" "Downloading model weights"
+        IFS='|' read -ra sizes <<< "${MODEL_SIZES[$m]}"
+        for size_entry in "${sizes[@]}"; do
+            if contains_single_size_model "${m}" && [[ "${SETUP_MODE}" != "modify" ]]; then
+                SETUP_WEIGHT_SIZE_RUN_STATUS["${m}|${size_entry}"]="pending"
+            elif is_size_selected "${m}" "${size_entry}"; then
+                SETUP_WEIGHT_SIZE_RUN_STATUS["${m}|${size_entry}"]="pending"
+            else
+                SETUP_WEIGHT_SIZE_RUN_STATUS["${m}|${size_entry}"]=""
+            fi
+        done
+        setup_log "  Weights"
         if contains_single_size_model "${m}" && [[ "${SETUP_MODE}" != "modify" ]]; then
             download_weights "${m}" "${MODEL_SIZES[$m]}" || return 1
         else
@@ -811,9 +1077,12 @@ perform_setup() {
                 fi
             done
         fi
+        setup_finish_step "${m}" "Downloading model weights" "done"
+        setup_finish_model "${m}"
+        setup_log ""
     done
 
-    setup_log "All weights downloaded."
+    setup_log "All selected models processed."
     setup_log "Weights saved to: ${SETUP_PLANTBENCH_DIR}/weights/"
     PLANTBENCH_DIR="${SETUP_PLANTBENCH_DIR}"
     return 0
@@ -828,9 +1097,11 @@ render_statusbar() {
     local hint="↑ ↓  navigate   ↵  select   q  quit"
     case "${STATE}" in
         setup_save_dir) hint="↵  continue   esc  cancel   q  quit" ;;
+        setup_existing_install) hint="↑ ↓  navigate   ↵  select   esc  back   q  quit" ;;
+        setup_removing_install) hint="removing   q  quit" ;;
         setup_models|setup_sizes) hint="↑ ↓  navigate   space  toggle   a  all   ↵  continue   esc  back   q  quit" ;;
         setup_confirm) hint="y/↵  install   n/esc  cancel   q  quit" ;;
-        setup_running) hint="setup running   q  quit" ;;
+        setup_running) hint="x  toggle logs   q  quit" ;;
         setup_done|setup_error) hint="any key  return   q  quit" ;;
         main_stub) hint="any key  return   q  quit" ;;
         manual_input) hint="↵  apply   esc  cancel   q  quit" ;;
@@ -1544,6 +1815,191 @@ render_setup_model_info_box() {
     fi
 }
 
+render_setup_existing_install() {
+    local W; W="$(setup_box_width 100)"
+    local H=16
+    local T=$(( (LINES - H) / 2 ))
+    local L=$(( (COLS - W) / 2 ))
+
+    draw_round_box "${T}" "${L}" "${H}" "${W}"
+
+    local row=$(( T + 2 ))
+    move "${row}" $(( L + 3 ))
+    printf 'Existing installation detected'
+
+    draw_hline $(( T + 3 )) "${L}" "${W}"
+
+    row=$(( T + 5 ))
+    move "${row}" $(( L + 3 ))
+    print_clipped $(( W - 6 )) "An installation already exists at the selected path"
+
+    row=$(( T + 7 ))
+    draw_round_box "${row}" $(( L + 3 )) 3 $(( W - 6 ))
+    move $(( row + 1 )) $(( L + 5 ))
+    print_clipped $(( W - 10 )) "${SETUP_PLANTBENCH_DIR}"
+
+    row=$(( T + 11 ))
+    local -a options=(
+        "Use existing installation"
+        "Remove existing installation and reinstall"
+        "Change path"
+    )
+    local i max_w=0 menu_col
+    for i in "${!options[@]}"; do
+        (( ${#options[$i]} > max_w )) && max_w=${#options[$i]}
+    done
+    menu_col=$(( L + (W - max_w - 4) / 2 ))
+
+    for i in "${!options[@]}"; do
+        move "${row}" "${menu_col}"
+        if (( i == SETUP_EXISTING_MENU_IDX )); then
+            printf '▶  %s' "${options[$i]}"
+        else
+            printf '   %s' "${options[$i]}"
+        fi
+        (( row++ ))
+    done
+    (( row++ ))
+
+    if [[ -n "${SETUP_ERR}" ]]; then
+        move $(( T + H - 2 )) $(( L + 3 ))
+        print_clipped $(( W - 6 )) "${SETUP_ERR}"
+    fi
+}
+
+render_setup_existing_install_menu_only() {
+    COLS=$(tput cols)
+    LINES=$(tput lines)
+    (( COLS < MIN_COLS || LINES < MIN_LINES )) && return
+
+    local W; W="$(setup_box_width 100)"
+    local H=16
+    local T=$(( (LINES - H) / 2 ))
+    local L=$(( (COLS - W) / 2 ))
+    local row=$(( T + 11 ))
+
+    local -a options=(
+        "Use existing installation"
+        "Remove existing installation and reinstall"
+        "Change path"
+    )
+
+    local i max_w=0 menu_col clear_w
+    for i in "${!options[@]}"; do
+        (( ${#options[$i]} > max_w )) && max_w=${#options[$i]}
+    done
+
+    menu_col=$(( L + (W - max_w - 4) / 2 ))
+    clear_w=$(( max_w + 4 ))
+
+    for i in "${!options[@]}"; do
+        move "${row}" "${menu_col}"
+        printf '%*s' "${clear_w}" ''
+
+        move "${row}" "${menu_col}"
+        if (( i == SETUP_EXISTING_MENU_IDX )); then
+            printf '▶  %s' "${options[$i]}"
+        else
+            printf '   %s' "${options[$i]}"
+        fi
+        (( row++ ))
+    done
+
+    hide_cursor
+}
+
+
+render_setup_removing_install() {
+    local W; W="$(setup_box_width 100)"
+    local H=14
+    local T=$(( (LINES - H) / 2 ))
+    local L=$(( (COLS - W) / 2 ))
+
+    draw_round_box "${T}" "${L}" "${H}" "${W}"
+
+    local row=$(( T + 2 ))
+    move "${row}" $(( L + 3 ))
+    printf 'Removing existing installation'
+    move "${row}" $(( L + W - 14 ))
+    printf 'please wait'
+
+    draw_hline $(( T + 3 )) "${L}" "${W}"
+
+    row=$(( T + 5 ))
+    move "${row}" $(( L + 3 ))
+    print_clipped $(( W - 6 )) "Removing the existing PlantBench directory"
+
+    row=$(( T + 7 ))
+    draw_round_box "${row}" $(( L + 3 )) 3 $(( W - 6 ))
+    move $(( row + 1 )) $(( L + 5 ))
+    print_clipped $(( W - 10 )) "${SETUP_PLANTBENCH_DIR}"
+
+    row=$(( T + 11 ))
+    local spinner="$(setup_spinner_char)"
+    local msg="${spinner}  Removing"
+    move "${row}" $(( L + (W - ${#msg}) / 2 ))
+    printf '%s' "${msg}"
+
+    hide_cursor
+}
+
+render_setup_removing_install_spinner_only() {
+    [[ "${STATE}" == "setup_removing_install" ]] || return
+
+    COLS=$(tput cols)
+    LINES=$(tput lines)
+    (( COLS < MIN_COLS || LINES < MIN_LINES )) && return
+
+    local W; W="$(setup_box_width 100)"
+    local H=14
+    local T=$(( (LINES - H) / 2 ))
+    local L=$(( (COLS - W) / 2 ))
+    local row=$(( T + 11 ))
+    local clear_w=$(( W - 6 ))
+
+    move "${row}" $(( L + 3 ))
+    printf '%*s' "${clear_w}" ''
+    move $(( row + 1 )) $(( L + 3 ))
+    printf '%*s' "${clear_w}" ''
+
+    local spinner="$(setup_spinner_char)"
+    local msg="${spinner}  Removing"
+    move "${row}" $(( L + (W - ${#msg}) / 2 ))
+    printf '%s' "${msg}"
+
+    hide_cursor
+}
+
+perform_existing_install_removal() {
+    STATE="setup_removing_install"
+    SETUP_SPINNER_FRAME=0
+    render
+
+    rm -rf -- "${SETUP_PLANTBENCH_DIR}" >/dev/null 2>&1 &
+    local pid=$!
+    local key="" rest=""
+
+    while kill -0 "${pid}" >/dev/null 2>&1; do
+        IFS= read -rsn1 -t 0.08 key || key=""
+        case "${key}" in
+            q|Q)
+                kill "${pid}" >/dev/null 2>&1 || true
+                wait "${pid}" >/dev/null 2>&1 || true
+                exit 0
+                ;;
+            $'\033')
+                IFS= read -rsn2 -t 0.01 rest || true
+                ;;
+        esac
+
+        SETUP_SPINNER_FRAME=$(( SETUP_SPINNER_FRAME + 1 ))
+        render_setup_removing_install_spinner_only
+    done
+
+    wait "${pid}"
+}
+
+
 render_setup_models() {
     local W; W="$(setup_box_width 100)"
     local H=15
@@ -1755,6 +2211,28 @@ render_setup_confirm() {
     render_setup_installation_box
 }
 
+setup_running_geometry() {
+    local __prefix="$1"
+    local W=$(( COLS - 8 ))
+    (( W > 110 )) && W=110
+    (( W < 70 )) && W=70
+    (( W > COLS - 4 )) && W=$(( COLS - 4 ))
+
+    local H=$(( LINES - 6 ))
+    (( H < 18 )) && H=18
+    (( H > LINES - 4 )) && H=$(( LINES - 4 ))
+
+    local T=$(( (LINES - H) / 2 ))
+    local L=$(( (COLS - W) / 2 ))
+    (( T < 2 )) && T=2
+    (( L < 2 )) && L=2
+
+    printf -v "${__prefix}_W" '%d' "${W}"
+    printf -v "${__prefix}_H" '%d' "${H}"
+    printf -v "${__prefix}_T" '%d' "${T}"
+    printf -v "${__prefix}_L" '%d' "${L}"
+}
+
 render_setup_running() {
     COLS=$(tput cols)
     LINES=$(tput lines)
@@ -1762,66 +2240,177 @@ render_setup_running() {
     draw_outer_frame
     render_statusbar
 
-    local W=$(( COLS - 8 ))
-    (( W > 110 )) && W=110
-    local H=$(( LINES - 6 ))
-    (( H < 18 )) && H=18
-    local T=$(( (LINES - H) / 2 )) L=$(( (COLS - W) / 2 ))
-    draw_box "${T}" "${L}" "${H}" "${W}"
+    local G_W G_H G_T G_L
+    setup_running_geometry G
 
-    local row=$(( T + 2 ))
-    move "${row}" $(( L + 3 )); printf 'Setup running'
-    move "${row}" $(( L + W - 18 )); printf 'please wait'
-    draw_hline $(( T + 3 )) "${L}" "${W}"
+    draw_box "${G_T}" "${G_L}" "${G_H}" "${G_W}"
 
-    render_setup_running_logs_only
+    local row=$(( G_T + 2 ))
+    move "${row}" $(( G_L + 3 ))
+    printf 'Setup running'
+
+    move "${row}" $(( G_L + G_W - 13 ))
+    printf 'please wait'
+    draw_hline $(( G_T + 3 )) "${G_L}" "${G_W}"
+
+    SETUP_RUNNING_SCREEN_DRAWN=1
+
+    if [[ "${SETUP_VIEW_MODE}" == "logs" ]]; then
+        render_setup_running_logs_only
+    else
+        render_setup_running_status_only
+    fi
+
     hide_cursor
 }
 
-render_setup_running_logs_only() {
+render_setup_running_clear_body() {
+    local W="$1" T="$2" L="$3" H="$4"
+    local top=$(( T + 5 ))
+    local bottom=$(( T + H - 2 ))
+    local row
+    for (( row = top; row <= bottom; row++ )); do
+        move "${row}" $(( L + 3 ))
+        printf '%*s' $(( W - 6 )) ''
+    done
+}
+
+render_setup_running_status_only() {
+    [[ "${STATE}" == "setup_running" ]] || return
+    [[ "${SETUP_VIEW_MODE}" == "status" ]] || return
+
     COLS=$(tput cols)
     LINES=$(tput lines)
 
     (( COLS < MIN_COLS || LINES < MIN_LINES )) && return
 
-    local W=$(( COLS - 8 ))
-    (( W > 110 )) && W=110
-    local H=$(( LINES - 6 ))
-    (( H < 18 )) && H=18
-    local T=$(( (LINES - H) / 2 )) L=$(( (COLS - W) / 2 ))
+    local G_W G_H G_T G_L
+    setup_running_geometry G
 
-    local log_top=$(( T + 5 ))
-    local log_bottom=$(( T + H - 2 ))
-    local max_lines=$(( log_bottom - log_top + 1 ))
-    local total=${#SETUP_LOG[@]}
-    local max_width=$(( W - 6 ))
-    local row line i start out_row
-
-    if (( total == 0 )); then
+    if (( SETUP_RUNNING_SCREEN_DRAWN == 0 )); then
+        render_setup_running
         return
     fi
 
-    if (( total <= max_lines )); then
-        row=$(( log_top + total - 1 ))
-        line="${SETUP_LOG[$(( total - 1 ))]}"
-        move "${row}" $(( L + 3 ))
-        printf '%*s' "${max_width}" ''
-        move "${row}" $(( L + 3 ))
-        print_clipped "${max_width}" "${line}"
-    else
-        start=$(( total - max_lines ))
-        out_row=${log_top}
-        for (( row = log_top; row <= log_bottom; row++ )); do
-            move "${row}" $(( L + 3 ))
-            printf '%*s' "${max_width}" ''
-        done
-        for (( i = start; i < total; i++ )); do
-            line="${SETUP_LOG[$i]}"
-            move "${out_row}" $(( L + 3 ))
-            print_clipped "${max_width}" "${line}"
-            (( out_row++ ))
-        done
+    render_setup_running_clear_body "${G_W}" "${G_T}" "${G_L}" "${G_H}"
+
+    local row=$(( G_T + 5 ))
+    local content_w=$(( G_W - 6 ))
+    local right_col=$(( G_L + G_W - 6 ))
+    local m idx model_name model_status icon spinner step step_status step_icon
+    local size_entry size_status size_icon size_label
+    local -a size_options=()
+
+    move "${row}" $(( G_L + 3 ))
+    print_clipped "${content_w}" "Installing selected models"
+    (( row += 2 ))
+
+    for idx in "${!SELECTED_MODELS[@]}"; do
+        m="${SELECTED_MODELS[$idx]}"
+        model_name="${MODEL_NAMES[$m]}"
+        model_status="${SETUP_MODEL_RUN_STATUS[$m]:-pending}"
+
+        case "${model_status}" in
+            done) icon='✓' ;;
+            current) icon='▶' ;;
+            *) icon='○' ;;
+        esac
+
+        move "${row}" $(( G_L + 5 ))
+        printf '%s  %s' "${icon}" "${model_name}"
+
+        if [[ "${model_status}" == "current" ]]; then
+            spinner="$(setup_spinner_char)"
+            move "${row}" "${right_col}"
+            printf '%s' "${spinner}"
+
+            for step in "Pulling container" "Cloning repo" "Downloading model weights"; do
+                (( row++ ))
+                step_status="${SETUP_STEP_RUN_STATUS["${m}|${step}"]:-pending}"
+                case "${step_status}" in
+                    done) step_icon='✓' ;;
+                    current) step_icon='▶' ;;
+                    skipped) step_icon='-' ;;
+                    *) step_icon='○' ;;
+                esac
+                local step_label
+                step_label="$(setup_step_display_label "${step}" "${step_status}")"
+                move "${row}" $(( G_L + 9 ))
+                printf '%s  %s' "${step_icon}" "${step_label}"
+
+                if [[ "${step}" == "Downloading model weights" && "${SETUP_CURRENT_STEP}" == "Downloading model weights" ]]; then
+                    IFS='|' read -ra size_options <<< "${MODEL_SIZES[$m]}"
+                    for size_entry in "${size_options[@]}"; do
+                        if [[ -n "${SETUP_WEIGHT_SIZE_RUN_STATUS["${m}|${size_entry}"]:-}" ]]; then
+                            size_status="${SETUP_WEIGHT_SIZE_RUN_STATUS["${m}|${size_entry}"]}"
+                            case "${size_status}" in
+                                done) size_icon='✓' ;;
+                                current) size_icon='▶' ;;
+                                skipped) size_icon='-' ;;
+                                *) size_icon='○' ;;
+                            esac
+                            size_label="$(size_short_label "${size_entry}")"
+                            (( row++ ))
+                            move "${row}" $(( G_L + 13 ))
+                            printf '%s  %s' "${size_icon}" "${size_label}"
+                        fi
+                    done
+                fi
+            done
+
+            # Visual breathing room before the next model after the expanded subtree.
+            (( row++ ))
+        fi
+
+        (( row++ ))
+        if (( row >= G_T + G_H - 3 )); then
+            break
+        fi
+    done
+
+    move $(( G_T + G_H - 2 )) $(( G_L + 3 ))
+    print_clipped "${content_w}" "Press x to show logs"
+    hide_cursor
+}
+
+render_setup_running_logs_only() {
+    [[ "${STATE}" == "setup_running" ]] || return
+    [[ "${SETUP_VIEW_MODE}" == "logs" ]] || return
+
+    COLS=$(tput cols)
+    LINES=$(tput lines)
+
+    (( COLS < MIN_COLS || LINES < MIN_LINES )) && return
+
+    local G_W G_H G_T G_L
+    setup_running_geometry G
+
+    if (( SETUP_RUNNING_SCREEN_DRAWN == 0 )); then
+        render_setup_running
+        return
     fi
+
+    render_setup_running_clear_body "${G_W}" "${G_T}" "${G_L}" "${G_H}"
+
+    local log_top=$(( G_T + 5 ))
+    local log_bottom=$(( G_T + G_H - 2 ))
+    local max_lines=$(( log_bottom - log_top + 1 ))
+    local total=${#SETUP_LOG[@]}
+    local max_width=$(( G_W - 6 ))
+    local line i start out_row
+
+    (( total == 0 )) && return
+
+    start=0
+    (( total > max_lines )) && start=$(( total - max_lines ))
+    out_row=${log_top}
+
+    for (( i = start; i < total; i++ )); do
+        line="${SETUP_LOG[$i]}"
+        move "${out_row}" $(( G_L + 3 ))
+        print_clipped "${max_width}" "${line}"
+        (( out_row++ ))
+    done
 
     hide_cursor
 }
@@ -1903,6 +2492,8 @@ render() {
             ;;
         main_stub) render_main_stub ;;
         setup_save_dir) render_setup_save_dir ;;
+        setup_existing_install) render_setup_existing_install ;;
+        setup_removing_install) render_setup_removing_install ;;
         setup_models) render_setup_models ;;
         setup_sizes) render_setup_sizes ;;
         setup_confirm) render_setup_confirm ;;
@@ -2043,6 +2634,50 @@ while true; do
             esac
             ;;
 
+        setup_existing_install)
+            case "${KEY}" in
+                $'\033')
+                    STATE="setup_save_dir"
+                    SETUP_ERR=""
+                    ;;
+                $'\033[A'|k)
+                    SETUP_EXISTING_MENU_IDX=$(( SETUP_EXISTING_MENU_IDX > 0 ? SETUP_EXISTING_MENU_IDX - 1 : 0 ))
+                    render_setup_existing_install_menu_only
+                    continue
+                    ;;
+                $'\033[B'|j)
+                    SETUP_EXISTING_MENU_IDX=$(( SETUP_EXISTING_MENU_IDX < 2 ? SETUP_EXISTING_MENU_IDX + 1 : 2 ))
+                    render_setup_existing_install_menu_only
+                    continue
+                    ;;
+                ''|$'\n')
+                    case "${SETUP_EXISTING_MENU_IDX}" in
+                        0)
+                            PLANTBENCH_DIR="${SETUP_PLANTBENCH_DIR}"
+                            STATE="home"
+                            MENU_IDX=0
+                            MAIN_MENU_IDX=0
+                            hide_cursor
+                            ;;
+                        1)
+                            if perform_existing_install_removal; then
+                                SETUP_ERR=""
+                                STATE="setup_models"
+                                SETUP_MENU_IDX=0
+                            else
+                                SETUP_ERR="Could not remove existing installation."
+                                STATE="setup_existing_install"
+                            fi
+                            ;;
+                        2)
+                            STATE="setup_save_dir"
+                            SETUP_ERR=""
+                            ;;
+                    esac
+                    ;;
+            esac
+            ;;
+
         setup_models)
             case "${KEY}" in
                 $'\033') STATE="home" ;;
@@ -2128,7 +2763,6 @@ while true; do
                 $'\033'|n|N) STATE="home" ;;
                 y|Y|''|$'\n')
                     STATE="setup_running"
-                    render
                     if perform_setup; then
                         STATE="setup_done"
                     else
