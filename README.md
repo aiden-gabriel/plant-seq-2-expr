@@ -23,6 +23,7 @@ Run each script in `/tests` to verify models and data load correctly.
 
 ## Pretrained Models
 
+#### Fine-tuned AgroNT Models
 | Model | HuggingFace |
 |-------|-------------|
 | *Arabidopsis thaliana* | `aiden-n-gabriel/arabidopsis_thaliana_nt` |
@@ -31,7 +32,7 @@ Run each script in `/tests` to verify models and data load correctly.
 | *Solanum lycopersicum* | `aiden-n-gabriel/solanum_lycopersicum_nt` |
 | *Zea mays* | `aiden-n-gabriel/zea_mays_nt` |
 
-Performance metrics for each model are in [`/docs/`](docs/).
+Performance metrics for each model are in [`/docs/pretrained_models`](docs/).
 
 > **Note:** The model can output predictions below zero. For all evaluations, predictions below zero are clipped to zero — this is the recommended inference behavior.
 
