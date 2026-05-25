@@ -54,7 +54,7 @@ Models are trained via `train.sh`, which calls `train.py`. See [`/docs/training/
 runs/
 └── {species}_{run_time}/
     ├── results.csv          # R² score per tissue and average
-    └── checkpoint/
+    └── checkpoint-####/     # Best performing model checkpoint
         ├── training_metadata
         └── ...              # All other model files
 ```
