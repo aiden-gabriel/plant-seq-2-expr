@@ -1468,12 +1468,13 @@ setup_models_selector_top() {
 
     wrap_text_for_box "${MODEL_INFO_BODY[$m]}" "${content_w}"
     local info_h=$(( ${#WRAPPED_LINES[@]} + 5 ))
-    local extra_h=0
-    [[ "${SETUP_MODE}" == "modify" ]] && extra_h=10
 
+    # Center only the model selector + model-info box as a single visual group.
+    # The modify-status and size-availability boxes are intentionally not part
+    # of this centering calculation; they remain directly below the info box.
     local install_top=$(( LINES - 5 ))
-    local content_h=$(( selector_h + info_h + extra_h ))
-    local center_t=$(( (LINES - selector_h) / 2 ))
+    local content_h=$(( selector_h + info_h ))
+    local center_t=$(( (LINES - content_h) / 2 ))
     local max_t=$(( install_top - content_h - 1 ))
 
     local top=${center_t}
