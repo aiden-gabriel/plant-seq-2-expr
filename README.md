@@ -1,38 +1,59 @@
+# plant-seq-2-expr
+
+
 ## Setup
-**If you don't want to use wandb you can comment it out in environment.yaml*
 
-#### Using Conda 
-**setup.sh will create a conda environment, if you want to use another type of environment use the environment.yaml file* 
-    cd setup
-    chmod +x setup.sh
-    ./setup.sh
+Using Conda (recommended) — `setup.sh` will create the environment automatically:
 
-The standard environment name defined in environment.yaml is: "nt"
+```bash
+cd setup
+chmod +x setup.sh
+./setup.sh
+```
+
+To use a different environment manager, use `setup/environment.yaml` directly. The default environment name is `nt`.
+
+> **Note:** W&B is included in `environment.yaml` but is optional — comment it out if you don't need experiment tracking.
 
 ### Testing Setup
-Run each of the test scripts in /tests to ensure models and data can be loaded
+
+Run each script in `/tests` to verify models and data load correctly.
+
+---
 
 ## Pretrained Models
-aiden-n-gabriel/arabidopsis_thaliana_nt
-aiden-n-gabriel/glycine_max_nt
-aiden-n-gabriel/oryza_sativa_nt
-aiden-n-gabriel/solanum_lycopersicum_nt
-aiden-n-gabriel/zea_mays_nt
 
-*See model performance metrics in /docs/pretrained_models/*
+| Model | HuggingFace |
+|-------|-------------|
+| *Arabidopsis thaliana* | `aiden-n-gabriel/arabidopsis_thaliana_nt` |
+| *Glycine max* | `aiden-n-gabriel/glycine_max_nt` |
+| *Oryza sativa* | `aiden-n-gabriel/oryza_sativa_nt` |
+| *Solanum lycopersicum* | `aiden-n-gabriel/solanum_lycopersicum_nt` |
+| *Zea mays* | `aiden-n-gabriel/zea_mays_nt` |
+
+Performance metrics for each model are in [`/docs/`](docs/).
+
+> **Note:** The model can output predictions below zero. For all evaluations, predictions below zero are clipped to zero — this is the recommended inference behavior.
+
+---
 
 ## Dataset
-aiden-n-gabriel/pgb_exp_parquet
+
+`aiden-n-gabriel/pgb_exp_parquet` on HuggingFace.
+
+---
 
 ## Training
-- Models can be trained using the train.sh which will use train.py as the main python file.
-- Arguments for train.py are detailed in /docs/training/train_args.md
 
+Models are trained via `train.sh`, which calls `train.py`. See [`/docs/training/train_args.md`](docs/training/train_args.md) for all arguments.
 
-### Standard Model Saving Format
-|-- runs
-|   |-- {species}_{run_time}
-|       |-- results.csv             # Contains r^2 score per tissue and avg
-|       |-- checkpoint              # Saved model
-|           |-- training_metadata   # Training parameters
-|           |-- ... all other model saving files ...
+### Output Format
+
+```
+runs/
+└── {species}_{run_time}/
+    ├── results.csv          # R² score per tissue and average
+    └── checkpoint/
+        ├── training_metadata
+        └── ...              # All other model files
+```
